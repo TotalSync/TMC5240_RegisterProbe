@@ -2,6 +2,11 @@ from dataclasses import dataclass
 from spidev import SpiDev
 from configparser import ConfigParser
 
+
+
+SYNC = 0b1010
+RESERVED = 0b1001 # This is a DNC but is included in the CRC
+
 @dataclass
 class TrinamicRegister:
     address: int
@@ -9,9 +14,8 @@ class TrinamicRegister:
     access: str
 
 class TMC5240:
-    def __init__(self, spi_if, spi_cs, config_file = None):
-        self.spi_if = spi_if
-        self.spi_cs = spi_cs
+    def __init__(self, addr, config_file = None):
+        self.addr = addr
 
         # General Config Registers
         # These Registers are 32 bits long
@@ -87,4 +91,82 @@ class TMC5240:
         self.mslut_7 = TrinamicRegister(0x67, 0x00, '')
         self.mslut_sel = TrinamicRegister(0x68, 0x00, '')
         self.mslut_start = TrinamicRegister(0x69, 0x00, '')
-        
+
+''' 
+Write Transaction Format:       Read Transaction Format:
+Sync + Reserved                 Sync + Reserved
+Node Address                    Node Address
+Register Address                Register Address
+Data                            CRC
+CRC                             Stop
+Stop                            
+
+Read Reply Format:
+Sync + Reserved
+Node Address
+Register Address
+Data
+CRC
+Stop
+
+'''
+
+# Reply length is 64 bits
+def read_register(reg):
+    recieving_data = True
+    bits = 0
+    while (recieving_data):
+        bit = read_bit()                # Read the bit from the pin
+        data = append_bit(data, bit)    # Appends new bit
+        crc = serial_read_crc(crc, bit) # Continue CRC calculation
+        bits += 1
+        recieving_data = bits != 64
+        # Wait for data?
+    return data
+
+def generate_crc(data):
+    crc = 0
+    for byte in data:
+        for bit in byte:
+            if (crc >> 7) ^ (bit & 0x01):
+                crc = (crc << 1) ^ 0x07
+            else:
+                crc = (crc << 1)
+    return crc
+
+def serial_read_crc(data, new_bit):
+    return (data << 1) | ((data & 0b1000) ^ (data & 0b0010) ^ (data & 0b0001) ^ new_bit)
+
+def generate_write_payload(drv, addr, data):
+    payload = SYNC
+    payload = (payload << 4) | RESERVED
+    payload = (payload << 16) | drv.address
+    payload = (payload << 8) | ((addr + 0x80) << 1) | 1
+    payload = (payload << 32) | data
+    crc = generate_crc(payload)
+    payload = (payload << 8) | crc
+    return payload
+
+def generate_read_payload(drv, addr):
+    payload = SYNC
+    payload = (payload << 4) | RESERVED
+    payload = (payload << 16) | drv.address
+    payload = (payload << 8) | ((addr) << 1) | 0
+    crc = generate_crc(payload)
+    payload = (payload << 8) | crc
+    return payload
+
+def write_payload():
+    return
+
+def write_bit():
+
+    return
+
+def read_bit():
+    return
+
+#Appends a new bit
+#Shifts data left by 1 and adds the new bit by ORing
+def append_bit(data, bit):
+    return (data << 1) | bit
