@@ -215,6 +215,7 @@ def generate_read_payload(drv, addr):
 
 def write_payload(line, payload):
     line.set_direction_output()
+    buffer = payload.to_bytes()
     for i in range(64):
         if payload << i & 0b1:
             line.set_value(False)
