@@ -1,11 +1,16 @@
 from dataclasses import dataclass
-from serial import *
 from configparser import ConfigParser
+
+import gpiod as gpd
+import time
+import struct
 
 
 
 SYNC = 0b1010
 RESERVED = 0b1001 # This is a DNC but is included in the CRC
+
+BAUD = 115200
 
 @dataclass
 class TrinamicRegister:
@@ -164,7 +169,7 @@ Stop
 '''
 
 # Reply length is 64 bits
-def read_register(reg):
+def read_reply(reg):
     recieving_data = True
     bits = 0
     while (recieving_data):
@@ -208,14 +213,21 @@ def generate_read_payload(drv, addr):
     payload = (payload << 8) | crc
     return payload
 
-def write_payload():
+def write_payload(line, payload):
+    line.set_direction_output()
+    for i in range(64):
+        if payload << i & 0b1:
+            line.set_value(False)
+        else:
+            line.set_value(True)
+        time.sleep(BAUD)
     return
 
-def write_bit():
+def write_bit(line):
 
     return
 
-def read_bit():
+def read_bit(line):
     return
 
 #Appends a new bit
