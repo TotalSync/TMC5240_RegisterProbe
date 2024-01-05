@@ -1,24 +1,25 @@
 from dataclasses import dataclass
 from configparser import ConfigParser
 
-import gpiod as gpd
+import gpiod
 import time
-import struct
+import os
 
 
 
 SYNC = 0b1010
 RESERVED = 0b1001 # This is a DNC but is included in the CRC
 
-BAUD = 115200
+BAUD = (1/9600)
 
 @dataclass
 class TrinamicRegister:
-    """Address: Where in memory the registers are located
-     Value: The value read/written from/to the register
-     Access: What type of access the register has. Key below.
-     Mask: ANDing the bits with the mask will leave the appropriate bits to write
-     Access: R = Read ; W = Write ; RW = Read Write ; RC = Read Clear (write a 1 to clear)"""
+    """Address: Where in memory the registers are located\n
+     Value: The value read/written from/to the register\n
+     Access: What type of access the register has. Key below.\n
+     Mask: ANDing the bits with the mask will leave the appropriate bits to write\n
+     Access: R = Read ; W = Write ; RW = Read Write ; RC = Read Clear (write a 1 to clear)
+     """
     address: int
     value: int
     access: str
@@ -129,6 +130,32 @@ class TMC5240:
         else:
             self.load_config(config_file)
 
+    def get_address():
+        return self.addr
+
+    def get_gconf(self, line, debug=False):
+        payload = generate_read_payload(self, self.gconf.address)
+        print(f"Payload: {hex(payload)}")
+        if(debug):
+            pause("Payload Generated")
+        write_payload(line, payload, 32)
+        if(debug): pause("Payload Written")
+        reply = read_reply(line)
+        if(debug): pause("Reply Read")
+        print(f"Data Read: {hex(reply)}")
+        return
+    
+    def set_gconf(self, line, value, debug=False):
+        payload = generate_write_payload(self, self.gconf.address, value)
+        if(debug): 
+            print(f"Payload: {payload}")
+            pause("Payload Generated")
+        write_payload(line, payload, 64)
+        if(debug): pause("Payload Written")
+        return
+        
+
+
 def load_config(self, filepath):
         print('loading config...')
         config = ConfigParser()
@@ -168,71 +195,147 @@ Stop
 
 '''
 
-# Reply length is 64 bits
-def read_reply(reg):
-    recieving_data = True
-    bits = 0
-    while (recieving_data):
-        bit = read_bit()                # Read the bit from the pin
-        data = append_bit(data, bit)    # Appends new bit
-        crc = serial_read_crc(crc, bit) # Continue CRC calculation
-        bits += 1
-        recieving_data = bits != 64
-        # Wait for data?
-    return data
+def generate_crc_32(data):
+    ''' Generates a cyclic redundancy check for a given data block.
+    For the purposes of the data, it includes the entirety of the payload.
 
-def generate_crc(data):
+    Done according to the given example on page 27 of the TMC5240 manual
+
+    Arguments:\n
+    data -- the payload containing sync, DNC, node address, register address, and (optionally) data. Restricted to 24 bits.  CRC should be appended to given data resulting it 32 bits
+
+    Returns:\n
+    crc --  the crc to be appended to the data 
+    '''
+    #for i in range(2,-1, -1):
+    #    byte = data & 0b1111_1111 << i
     crc = 0
-    for byte in data:
-        for bit in byte:
-            if (crc >> 7) ^ (bit & 0x01):
-                crc = (crc << 1) ^ 0x07
+    datagram = [
+        (data >> 24) & 0x0000_00FF, 
+        (data >> 16) & 0x0000_00FF, 
+        (data >> 8) & 0x0000_00FF, 
+        (data & 0x0000_00FF)
+        ]
+    for byte in datagram:
+        for _ in range(0, 8):
+            if(crc >> 7) ^ (byte & 0x0000_0001):
+                crc = ((crc << 1) ^ 0x0000_0007) & 0x0000_00FF
             else:
-                crc = (crc << 1)
+                crc = (crc << 1) & 0x0000_00FF
+            byte = byte >> 1
     return crc
 
-def serial_read_crc(data, new_bit):
-    return (data << 1) | ((data & 0b1000) ^ (data & 0b0010) ^ (data & 0b0001) ^ new_bit)
+def generate_crc_64(data):
+    ''' Generates a cyclic redundancy check for a given data block.
+    For the purposes of the data, it includes the entirety of the payload.
+
+    Done according to the given example on page 27 of the TMC5240 manual
+
+    Arguments:\n
+    data -- the payload containing sync, DNC, node address, register address, and (optionally) data. Restricted to 54 bits. CRC should be appended to given data resulting it 64 bits.
+
+    Returns:\n
+    crc --  the crc to be appended to the data 
+    '''
+    crc = 0
+    datagram = [
+        (data >> 56) & 0x0000_00FF,
+        (data >> 48) & 0x0000_00FF,
+        (data >> 40) & 0x0000_00FF,
+        (data >> 32) & 0x0000_00FF,
+        (data >> 24) & 0x0000_00FF, 
+        (data >> 16) & 0x0000_00FF, 
+        (data >> 8) & 0x0000_00FF, 
+        (data & 0x0000_00FF)
+        ]
+    for byte in datagram:
+        for _ in range(0, 8):
+            if(crc >> 7) ^ (byte & 0x0000_0001):
+                crc = ((crc << 1) ^ 0x0000_0007) & 0x0000_00FF
+            else:
+                crc = (crc << 1) & 0x0000_00FF
+            byte = byte >> 1
+    return crc
+
 
 def generate_write_payload(drv, addr, data):
+    ''' Creates the payload for a write request to be written to the GPIO line
+
+    Arguments:
+    drv -- the TMC driver object that will be written to
+    addr -- the register that is desired to be written to
+    data -- the data to be written to the driver. Must be 32 bits.
+
+    Returns:
+    payload -- a payload to be used by write_payload()
+    '''
     payload = SYNC
     payload = (payload << 4) | RESERVED
-    payload = (payload << 16) | drv.address
-    payload = (payload << 8) | ((addr + 0x80) << 1) | 1
+    payload = (payload << 8) | drv.addr
+    payload = (payload << 8) | ((addr | 0x80) << 1) | 1
     payload = (payload << 32) | data
-    crc = generate_crc(payload)
-    payload = (payload << 8) | crc
+    crc = generate_crc_64(payload)
+    payload = (payload << 8) | (crc & 0x0000_00FF)
     return payload
 
 def generate_read_payload(drv, addr):
+    ''' Creates the payload for a read request to be written to the GPIO line
+
+    Arguments:\n
+    drv -- the TMC driver object that will be written to\n
+    addr -- the register that is desired to be written to\n
+
+    Returns:\n
+    payload -- a payload to be used by write_payload()\n
+    '''
     payload = SYNC
     payload = (payload << 4) | RESERVED
-    payload = (payload << 16) | drv.address
-    payload = (payload << 8) | ((addr) << 1) | 0
-    crc = generate_crc(payload)
-    payload = (payload << 8) | crc
+    payload = (payload << 8) | drv.addr
+    payload = (payload << 8) | (addr << 1)
+    crc = generate_crc_32(payload)
+    payload = (payload << 8) | (crc & 0x0000_00FF)
     return payload
 
-def write_payload(line, payload):
-    line.set_direction_output()
-    buffer = payload.to_bytes()
-    for i in range(64):
-        if payload << i & 0b1:
-            line.set_value(False)
-        else:
+def write_payload(line, payload, length):
+    '''Writes a given payload to the desired GPIO line
+
+    Arguments:\n
+    line -- gpiod Line Object\n
+    payload -- the data desired to be written to the line\n
+    '''
+    line.set_direction_output(True)
+    #line.set_value(True)
+    #time.sleep(0.5) # Let the interface reset
+    for i in range(length-1, -1, -1):
+        if payload & 0b1 << i:
             line.set_value(True)
+        else:
+            line.set_value(False)
         time.sleep(BAUD)
+    line.set_value(True) #Reset Line to idle state (HIGH) (Also technically the Stop-Bit)
     return
 
-def write_bit(line):
+def read_reply(line):
+    '''Read a reply from the driver.
 
-    return
-
-def read_bit(line):
-    return
-
-#Appends a new bit
-#Shifts data left by 1 and adds the new bit by ORing
-def append_bit(data, bit):
-    return (data << 1) | bit
+    Arguments:\n
+    line -- gpiod Line object\n
+    \n
+    Returns:\n
+    reply -- the data read from the line.\n
+    '''
+    line.set_direction_input()
+    time.sleep(8*BAUD)
+    reply = 0
+    for _ in range(64):
+        reply = (reply << 1) | line.get_value()
+        time.sleep(BAUD)
+    line.set_direction_output(True)
+    crc = generate_crc_64(reply >> 8)
+    if (crc != (reply & 0x0000_00FF)):
+        print(f"ERROR: Reply CRC does not match: {hex(crc & 0x0000_00FF)},({crc & 0x0000_00FF}) vs. {hex(reply & 0x0000_00FF)}, ({reply & 0x0000_00FF}) ")
+    return reply
+    
+def pause(msg):
+    reply = input(f"{msg}: Press <Enter> to continue.")
         
